@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"syscall"
 
 	"github.com/apex/log"
 	"github.com/apex/log/handlers/cli"
@@ -21,9 +23,10 @@ var (
 
 	region  = app.Flag("region", "Configure the AWS region").Short('r').String()
 	profile = app.Flag("profile", "Configure the AWS profile").Short('p').String()
+	role    = app.Flag("role", "Specify an AWS role ARN to assume").Short('R').String()
 
-	dynamoTable = app.Flag("table", "DynamoDB table.").Default("credential-store").Short('t').String()
-	alias       = app.Flag("alias", "KMS key alias.").Default("alias/credstash").Short('k').String()
+	dynamoTable = app.Flag("table", "DynamoDB table.").Default("credential-store").OverrideDefaultFromEnvar("UNICREDS_TABLE").Short('t').String()
+	alias       = app.Flag("alias", "KMS key alias.").Default("alias/credstash").OverrideDefaultFromEnvar("UNICREDS_ALIAS").Short('k').String()
 	encContext  = encryptionContext(app.Flag("enc-context", "Add a key value pair to the encryption context.").Short('E'))
 
 	// commands
@@ -55,6 +58,9 @@ var (
 	cmdDelete     = app.Command("delete", "Delete a credential from the store.")
 	cmdDeleteName = cmdDelete.Arg("credential", "The name of the credential to delete.").Required().String()
 
+	cmdExecute        = app.Command("exec", "Execute a command with all secrets loaded as environment variables.")
+	cmdExecuteCommand = cmdExecute.Arg("command", "The command to execute.").Required().Strings()
+
 	// Version app version
 	Version = "1.0.0"
 )
@@ -74,7 +80,7 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	unicreds.SetAwsConfig(region, profile)
+	unicreds.SetAwsConfig(region, profile, role)
 
 	switch command {
 	case cmdSetup.FullCommand():
@@ -134,7 +140,7 @@ func main() {
 		if err != nil {
 			printFatalError(err)
 		}
-		log.WithFields(log.Fields{"name": *cmdPutName, "version": version}).Info("stored")
+		log.WithFields(log.Fields{"name": *cmdPutFileName, "version": version}).Info("stored")
 	case cmdList.FullCommand():
 		creds, err := unicreds.ListSecrets(dynamoTable, *cmdListAllVersions)
 		if err != nil {
@@ -155,7 +161,7 @@ func main() {
 			printFatalError(err)
 		}
 	case cmdGetAll.FullCommand():
-		creds, err := unicreds.GetAllSecrets(dynamoTable, *cmdGetAllVersions)
+		creds, err := unicreds.GetAllSecrets(dynamoTable, *cmdGetAllVersions, encContext)
 		if err != nil {
 			printFatalError(err)
 		}
@@ -179,6 +185,20 @@ func main() {
 		if err != nil {
 			printFatalError(err)
 		}
+	case cmdExecute.FullCommand():
+		args := []string(*cmdExecuteCommand)
+		commandPath, err := exec.LookPath(args[0])
+		if err != nil {
+			printFatalError(err)
+		}
+		creds, err := unicreds.GetAllSecrets(dynamoTable, *cmdGetAllVersions, encContext)
+		for _, cred := range creds {
+			os.Setenv(cred.Name, cred.Secret)
+		}
+		err = syscall.Exec(commandPath, args, os.Environ())
+		if err != nil {
+			printFatalError(err)
+		}
 	}
 }
 
@@ -190,7 +210,7 @@ func printFatalError(err error) {
 func printSecret(secret string, noline bool) {
 	log.WithField("noline", noline).Debug("print secret")
 	if noline {
-		fmt.Printf(secret)
+		fmt.Print(secret)
 	} else {
 		fmt.Println(secret)
 	}

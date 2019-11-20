@@ -1,9 +1,12 @@
 package unicreds
 
 import (
+	"fmt"
+
 	"github.com/apex/log"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
+	"github.com/aws/aws-sdk-go/aws/session"
 )
 
 const (
@@ -12,30 +15,52 @@ const (
 
 // SetAwsConfig configure the AWS region with a fallback for discovery
 // on EC2 hosts.
-func SetAwsConfig(region, profile *string) error {
+func SetAwsConfig(region, profile *string, role *string) (err error) {
 	if region == nil {
 		// Try to get our region based on instance metadata
-		region, err := getRegion()
+		region, err = getRegion()
 		if err != nil {
 			return err
 		}
-		// Update the aws config overrides if present
-		setAwsConfig(region, profile)
-		return nil
 	}
 
-	setAwsConfig(region, profile)
+	// This is to work around a limitation of the credentials
+	// chain when providing an AWS profile as a flag
+	if aws.StringValue(region) == "" && aws.StringValue(profile) != "" {
+		return fmt.Errorf("Must provide a region flag when specifying a profile")
+	}
+
+	setAwsConfig(region, profile, role)
 	return nil
 }
 
-func setAwsConfig(region, profile *string) {
+func setAwsConfig(region, profile, role *string) {
 	log.WithFields(log.Fields{"region": aws.StringValue(region), "profile": aws.StringValue(profile)}).Debug("Configure AWS")
-	config := &aws.Config{Region: region}
-	// if a profile is supplied then just use the shared credentials provider
-	// as per docs this will look in $HOME/.aws/credentials if the filename is ""
-	if aws.StringValue(profile) != "" {
-		config.Credentials = credentials.NewSharedCredentials("", *profile)
+
+	sess := getAwsSession(region, profile, role)
+
+	SetDynamoDBSession(sess)
+	SetKMSSession(sess)
+}
+
+func getAwsSession(region, profile, role *string) *session.Session {
+	config := aws.Config{Region: region}
+
+	// If no role is supplied, use the shared AWS config
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		Config:            config,
+		SharedConfigState: session.SharedConfigEnable,
+		Profile:           aws.StringValue(profile),
+	}))
+
+	// If a role is supplied, return a new session using STS-generated credentials
+	if aws.StringValue(role) != "" {
+		log.WithFields(log.Fields{"role": aws.StringValue(role), "profile": aws.StringValue(profile)}).Debug("AssumeRole")
+		config.Credentials = stscreds.NewCredentials(sess, *role)
+
+		return session.Must(session.NewSession(&config))
 	}
-	SetDynamoDBConfig(config)
-	SetKMSConfig(config)
+
+	// If no role is assumed, return initial session
+	return sess
 }
